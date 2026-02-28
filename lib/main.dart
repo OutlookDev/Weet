@@ -1,8 +1,18 @@
 import 'dart:math' as math;
-
 import 'package:flutter/material.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
+import 'login_page.dart';
+import 'chat_page.dart'; // <-- 이 줄을 꼭 추가해야 'ChatPage'를 찾을 수 있어요!
 
-void main() {
+void main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+
+  // [중요] 여기에 본인의 Supabase URL과 Anon Key를 넣으세요!
+  await Supabase.initialize(
+    url: 'https://nsvunavsdjegjppsqopw.supabase.co',
+    anonKey: 'sb_publishable_PXSlvkjX62rOYAkyv9L2Kw_Yxm2MNH-',
+  );
+
   runApp(const WeetApp());
 }
 
@@ -18,21 +28,36 @@ class WeetApp extends StatelessWidget {
         useMaterial3: true,
         colorSchemeSeed: const Color(0xFF5C6AC4),
       ),
-      home: const WeetHomePage(),
+      home: const AuthCheck(),
+    );
+  }
+}
+
+class AuthCheck extends StatelessWidget {
+  const AuthCheck({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return StreamBuilder<AuthState>(
+      stream: Supabase.instance.client.auth.onAuthStateChange,
+      builder: (context, snapshot) {
+        final session = snapshot.data?.session;
+        if (session != null) {
+          return const WeetHomePage();
+        } else {
+          return const LoginPage();
+        }
+      },
     );
   }
 }
 
 class Person {
-  Person({
-    required this.name,
-    required this.category,
-    required this.score,
-  });
-
-  final String name;
-  final String category;
-  final int score;
+  Person({required this.id, required this.name, required this.category, required this.score});
+  final String id; // DB의 UUID를 저장
+  String name;
+  String category;
+  int score;
 }
 
 class WeetHomePage extends StatefulWidget {
@@ -43,246 +68,210 @@ class WeetHomePage extends StatefulWidget {
 }
 
 class _WeetHomePageState extends State<WeetHomePage> {
-  final List<String> _categories = <String>[
-    'Family',
-    'Friends',
-    'Business',
-    'Other',
-  ];
-
-  final List<Person> _people = <Person>[
-    Person(name: 'Mom', category: 'Family', score: 95),
-    Person(name: 'Alex', category: 'Friends', score: 70),
-    Person(name: 'Chris', category: 'Business', score: 40),
-  ];
-
+  final supabase = Supabase.instance.client;
+  final List<String> _categories = <String>['Family', 'Friends', 'Business', 'Other'];
+  List<Person> _people = [];
   String _selectedCategory = 'All';
 
-  List<Person> get _visiblePeople {
-    if (_selectedCategory == 'All') {
-      return _people;
-    }
-    return _people
-        .where((Person person) => person.category == _selectedCategory)
-        .toList();
+  @override
+  void initState() {
+    super.initState();
+    _fetchPeople(); // 앱 실행 시 데이터 불러오기
   }
 
-  Future<void> _openAddCategoryDialog() async {
-    final TextEditingController controller = TextEditingController();
+  // 데이터 불러오기
+  Future<void> _fetchPeople() async {
+    final userId = supabase.auth.currentUser?.id;
+    if (userId == null) return;
 
-    final String? result = await showDialog<String>(
-      context: context,
-      builder: (BuildContext context) {
-        return AlertDialog(
-          title: const Text('Add Category'),
-          content: TextField(
-            controller: controller,
-            decoration: const InputDecoration(
-              hintText: 'Category name',
-            ),
-            textInputAction: TextInputAction.done,
-            onSubmitted: (_) => Navigator.of(context).pop(controller.text.trim()),
-          ),
-          actions: <Widget>[
-            TextButton(
-              onPressed: () => Navigator.of(context).pop(),
-              child: const Text('Cancel'),
-            ),
-            FilledButton(
-              onPressed: () => Navigator.of(context).pop(controller.text.trim()),
-              child: const Text('Add'),
-            ),
-          ],
-        );
-      },
-    );
-
-    if (result == null || result.isEmpty) {
-      return;
+    try {
+      final data = await supabase
+          .from('people')
+          .select()
+          .eq('user_id', userId)
+          .order('created_at');
+          
+      setState(() {
+        _people = (data as List).map((item) => Person(
+          id: item['id'],
+          name: item['name'],
+          category: item['category'],
+          score: item['score'],
+        )).toList();
+      });
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('데이터 로드 실패: $e')));
+      }
     }
+  }
 
-    if (_categories.contains(result)) {
-      _showSnackBar('Category already exists.');
-      return;
+  // 데이터 추가
+  Future<void> _addPerson(String name, String category, int score) async {
+    final userId = supabase.auth.currentUser?.id;
+    try {
+      await supabase.from('people').insert({
+        'user_id': userId,
+        'name': name,
+        'category': category,
+        'score': score,
+      });
+      _fetchPeople(); // 목록 갱신
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('추가 실패: $e')));
+      }
     }
+  }
 
-    setState(() {
-      _categories.add(result);
-    });
+  // 데이터 수정
+  Future<void> _updatePerson(Person p) async {
+    try {
+      await supabase.from('people').update({
+        'name': p.name,
+        'category': p.category,
+        'score': p.score,
+      }).eq('id', p.id);
+      _fetchPeople();
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('수정 실패: $e')));
+      }
+    }
+  }
+
+  // 데이터 삭제
+  Future<void> _deletePerson(String id) async {
+    try {
+      await supabase.from('people').delete().eq('id', id);
+      _fetchPeople();
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('삭제 실패: $e')));
+      }
+    }
+  }
+
+  List<Person> get _visiblePeople {
+    if (_selectedCategory == 'All') return _people;
+    return _people.where((p) => p.category == _selectedCategory).toList();
   }
 
   Future<void> _openAddPersonDialog() async {
-    final TextEditingController nameController = TextEditingController();
-
+    final nameController = TextEditingController();
     String category = _categories.first;
     int score = 50;
-    int? checklistValue;
 
-    final Person? person = await showDialog<Person>(
+    await showDialog(
       context: context,
-      builder: (BuildContext context) {
-        return StatefulBuilder(
-          builder: (BuildContext context, void Function(void Function()) setDialogState) {
-            return AlertDialog(
-              title: const Text('Add Person'),
-              content: SingleChildScrollView(
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: <Widget>[
-                    TextField(
-                      controller: nameController,
-                      decoration: const InputDecoration(
-                        labelText: 'Name',
-                        border: OutlineInputBorder(),
-                      ),
-                    ),
-                    const SizedBox(height: 12),
-                    DropdownButtonFormField<String>(
-                      initialValue: category,
-                      decoration: const InputDecoration(
-                        labelText: 'Category',
-                        border: OutlineInputBorder(),
-                      ),
-                      items: _categories
-                          .map(
-                            (String cat) => DropdownMenuItem<String>(
-                              value: cat,
-                              child: Text(cat),
-                            ),
-                          )
-                          .toList(),
-                      onChanged: (String? value) {
-                        if (value == null) {
-                          return;
-                        }
-                        setDialogState(() {
-                          category = value;
-                        });
-                      },
-                    ),
-                    const SizedBox(height: 16),
-                    Align(
-                      alignment: Alignment.centerLeft,
-                      child: Text(
-                        'Relationship Score: $score',
-                        style: Theme.of(context).textTheme.titleSmall,
-                      ),
-                    ),
-                    Slider(
-                      min: 0,
-                      max: 100,
-                      divisions: 100,
-                      value: score.toDouble(),
-                      label: '$score',
-                      onChanged: (double value) {
-                        setDialogState(() {
-                          checklistValue = null;
-                          score = value.round();
-                        });
-                      },
-                    ),
-                    const SizedBox(height: 8),
-                    Align(
-                      alignment: Alignment.centerLeft,
-                      child: Text(
-                        'Quick checklist',
-                        style: Theme.of(context).textTheme.titleSmall,
-                      ),
-                    ),
-                    Wrap(
-                      spacing: 8,
-                      children: <int>[20, 40, 60, 80, 100]
-                          .map(
-                            (int value) => ChoiceChip(
-                              label: Text('$value'),
-                              selected: checklistValue == value,
-                              onSelected: (_) {
-                                setDialogState(() {
-                                  checklistValue = value;
-                                  score = value;
-                                });
-                              },
-                            ),
-                          )
-                          .toList(),
-                    ),
-                  ],
-                ),
+      builder: (context) => StatefulBuilder(
+        builder: (context, setDialogState) => AlertDialog(
+          title: const Text('Add Person'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              TextField(controller: nameController, decoration: const InputDecoration(labelText: 'Name')),
+              DropdownButtonFormField<String>(
+                value: category,
+                items: _categories.map((c) => DropdownMenuItem(value: c, child: Text(c))).toList(),
+                onChanged: (v) => setDialogState(() => category = v!),
               ),
-              actions: <Widget>[
-                TextButton(
-                  onPressed: () => Navigator.of(context).pop(),
-                  child: const Text('Cancel'),
-                ),
-                FilledButton(
-                  onPressed: () {
-                    final String name = nameController.text.trim();
-                    if (name.isEmpty) {
-                      return;
-                    }
-                    Navigator.of(context).pop(
-                      Person(name: name, category: category, score: score),
-                    );
-                  },
-                  child: const Text('Save'),
-                ),
-              ],
-            );
-          },
-        );
-      },
+              Slider(min: 0, max: 100, value: score.toDouble(), onChanged: (v) => setDialogState(() => score = v.round())),
+              Text('Score: $score'),
+            ],
+          ),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(context), child: const Text('Cancel')),
+            FilledButton(onPressed: () {
+              if (nameController.text.isNotEmpty) {
+                _addPerson(nameController.text, category, score);
+                Navigator.pop(context);
+              }
+            }, child: const Text('Save')),
+          ],
+        ),
+      ),
     );
-
-    if (person == null) {
-      return;
-    }
-
-    setState(() {
-      _people.add(person);
-    });
   }
 
-  void _showSnackBar(String message) {
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text(message)),
+  Future<void> _openEditPersonDialog(Person person) async {
+    final nameController = TextEditingController(text: person.name);
+    String category = person.category;
+    int score = person.score;
+
+    await showDialog(
+      context: context,
+      builder: (context) => StatefulBuilder(
+        builder: (context, setDialogState) => AlertDialog(
+          title: const Text('Edit Person'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              TextField(controller: nameController, decoration: const InputDecoration(labelText: 'Name')),
+              DropdownButtonFormField<String>(
+                value: category,
+                items: _categories.map((c) => DropdownMenuItem(value: c, child: Text(c))).toList(),
+                onChanged: (v) => setDialogState(() => category = v!),
+              ),
+              Slider(min: 0, max: 100, value: score.toDouble(), onChanged: (v) => setDialogState(() => score = v.round())),
+              Text('Score: $score'),
+            ],
+          ),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(context), child: const Text('Cancel')),
+            FilledButton(onPressed: () {
+              person.name = nameController.text;
+              person.category = category;
+              person.score = score;
+              _updatePerson(person);
+              Navigator.pop(context);
+            }, child: const Text('Update')),
+          ],
+        ),
+      ),
     );
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(
-        title: const Text('Weet Relationship Map'),
-        actions: <Widget>[
-          IconButton(
-            tooltip: 'Add category',
-            onPressed: _openAddCategoryDialog,
-            icon: const Icon(Icons.category_outlined),
-          ),
-          IconButton(
-            tooltip: 'Add person',
-            onPressed: _openAddPersonDialog,
-            icon: const Icon(Icons.person_add_alt_1),
-          ),
-        ],
-      ),
+   // WeetHomePage의 build 함수 내 AppBar 부분 수정
+appBar: AppBar(
+  title: const Text('Weet Map'),
+  leading: IconButton(
+    icon: const Icon(Icons.logout),
+    onPressed: () => supabase.auth.signOut(),
+  ),
+  actions: [
+    // 채팅 페이지 이동 버튼 추가!
+    IconButton(
+      icon: const Icon(Icons.chat_bubble_outline),
+      onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (context) => const ChatPage())),
+    ),
+    IconButton(onPressed: _openAddPersonDialog, icon: const Icon(Icons.person_add_alt_1)),
+  ],
+),
       body: Column(
-        children: <Widget>[
-          const SizedBox(height: 8),
+        children: [
           _CategoryFilterBar(
-            categories: <String>['All', ..._categories],
+            categories: ['All', ..._categories],
             selectedCategory: _selectedCategory,
-            onSelect: (String value) {
-              setState(() {
-                _selectedCategory = value;
-              });
-            },
+            onSelect: (v) => setState(() => _selectedCategory = v),
           ),
-          const SizedBox(height: 8),
           Expanded(
-            child: Padding(
-              padding: const EdgeInsets.all(16),
-              child: RelationshipMap(people: _visiblePeople),
+            child: RelationshipMap(
+              people: _visiblePeople,
+              onLongPress: (person) {
+                showModalBottomSheet(
+                  context: context,
+                  builder: (context) => Wrap(
+                    children: [
+                      ListTile(leading: const Icon(Icons.edit), title: const Text('Edit'), onTap: () { Navigator.pop(context); _openEditPersonDialog(person); }),
+                      ListTile(leading: const Icon(Icons.delete, color: Colors.red), title: const Text('Delete'), onTap: () { Navigator.pop(context); _deletePerson(person.id); }),
+                    ],
+                  ),
+                );
+              },
             ),
           ),
         ],
@@ -291,92 +280,45 @@ class _WeetHomePageState extends State<WeetHomePage> {
   }
 }
 
-class _CategoryFilterBar extends StatelessWidget {
-  const _CategoryFilterBar({
-    required this.categories,
-    required this.selectedCategory,
-    required this.onSelect,
-  });
-
-  final List<String> categories;
-  final String selectedCategory;
-  final ValueChanged<String> onSelect;
-
-  @override
-  Widget build(BuildContext context) {
-    return SizedBox(
-      height: 44,
-      child: ListView.separated(
-        padding: const EdgeInsets.symmetric(horizontal: 16),
-        scrollDirection: Axis.horizontal,
-        itemBuilder: (BuildContext context, int index) {
-          final String category = categories[index];
-          return ChoiceChip(
-            label: Text(category),
-            selected: selectedCategory == category,
-            onSelected: (_) => onSelect(category),
-          );
-        },
-        separatorBuilder: (_, __) => const SizedBox(width: 8),
-        itemCount: categories.length,
-      ),
-    );
-  }
-}
-
 class RelationshipMap extends StatelessWidget {
-  const RelationshipMap({super.key, required this.people});
-
+  const RelationshipMap({super.key, required this.people, required this.onLongPress});
   final List<Person> people;
-
-  static const List<Color> _palette = <Color>[
-    Color(0xFF6750A4),
-    Color(0xFF00796B),
-    Color(0xFF5D4037),
-    Color(0xFF1976D2),
-    Color(0xFFE65100),
-    Color(0xFF6A1B9A),
-  ];
+  final Function(Person) onLongPress;
 
   @override
   Widget build(BuildContext context) {
     return LayoutBuilder(
-      builder: (BuildContext context, BoxConstraints constraints) {
+      builder: (context, constraints) {
         final double size = math.min(constraints.maxWidth, constraints.maxHeight);
         final Offset center = Offset(size / 2, size / 2);
-        final double maxRadius = size / 2 - 24;
+        final double maxRadius = size / 2 - 40;
 
         return Center(
           child: SizedBox(
-            width: size,
-            height: size,
+            width: size, height: size,
             child: Stack(
-              children: <Widget>[
+              children: [
                 CustomPaint(
                   size: Size(size, size),
-                  painter: _MapRingsPainter(),
+                  painter: _ConnectionPainter(people: people, center: center, maxRadius: maxRadius),
                 ),
-                Positioned(
-                  left: center.dx - 26,
-                  top: center.dy - 26,
-                  child: _CenterNode(),
-                ),
-                ...people.asMap().entries.map((MapEntry<int, Person> entry) {
+                Positioned(left: center.dx - 26, top: center.dy - 26, child: _CenterNode()),
+                ...people.asMap().entries.map((entry) {
                   final int index = entry.key;
                   final Person person = entry.value;
                   final double angle = (2 * math.pi / math.max(1, people.length)) * index;
+                  
                   final double radiusFactor = (100 - person.score) / 100;
-                  final double radius = (radiusFactor * maxRadius).clamp(28, maxRadius);
+                  final double radius = (radiusFactor * (maxRadius - 60)) + 60;
 
                   final double x = center.dx + math.cos(angle) * radius;
                   final double y = center.dy + math.sin(angle) * radius;
 
                   return Positioned(
-                    left: x - 36,
-                    top: y - 20,
-                    child: _PersonChip(
-                      person: person,
-                      color: _palette[index % _palette.length],
+                    left: x - 35, top: y - 35,
+                    child: GestureDetector(
+                      onLongPress: () => onLongPress(person),
+                      child: _PersonCircle(person: person),
                     ),
                   );
                 }),
@@ -389,75 +331,90 @@ class RelationshipMap extends StatelessWidget {
   }
 }
 
-class _MapRingsPainter extends CustomPainter {
+class _ConnectionPainter extends CustomPainter {
+  _ConnectionPainter({required this.people, required this.center, required this.maxRadius});
+  final List<Person> people;
+  final Offset center;
+  final double maxRadius;
+
   @override
   void paint(Canvas canvas, Size size) {
-    final Offset center = Offset(size.width / 2, size.height / 2);
-    final double baseRadius = size.width / 2 - 8;
-
-    final Paint ringPaint = Paint()
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = 1.4
-      ..color = Colors.black12;
-
-    for (int i = 1; i <= 4; i++) {
-      canvas.drawCircle(center, baseRadius * (i / 4), ringPaint);
+    final paint = Paint()..color = Colors.black12..strokeWidth = 1.5;
+    for (int i = 0; i < people.length; i++) {
+      final double angle = (2 * math.pi / math.max(1, people.length)) * i;
+      final double radiusFactor = (100 - people[i].score) / 100;
+      final double radius = (radiusFactor * (maxRadius - 60)) + 60;
+      final Offset target = Offset(center.dx + math.cos(angle) * radius, center.dy + math.sin(angle) * radius);
+      canvas.drawLine(center, target, paint);
     }
   }
+  @override bool shouldRepaint(covariant CustomPainter oldDelegate) => true;
+}
+
+class _PersonCircle extends StatelessWidget {
+  const _PersonCircle({required this.person});
+  final Person person;
 
   @override
-  bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
+  Widget build(BuildContext context) {
+    return Container(
+      width: 70, height: 70,
+      decoration: BoxDecoration(
+        shape: BoxShape.circle,
+        color: Colors.white,
+        boxShadow: [
+          BoxShadow(color: Colors.black.withOpacity(0.1), blurRadius: 4, offset: const Offset(0, 2))
+        ],
+        border: Border.all(color: Colors.blueAccent.withOpacity(0.3), width: 2),
+      ),
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 4),
+            child: Text(person.name, style: const TextStyle(fontSize: 11, fontWeight: FontWeight.bold), overflow: TextOverflow.ellipsis),
+          ),
+          Text('${person.score}', style: const TextStyle(fontSize: 10, color: Colors.blueAccent)),
+        ],
+      ),
+    );
+  }
 }
 
 class _CenterNode extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Container(
-      width: 52,
-      height: 52,
-      decoration: BoxDecoration(
-        shape: BoxShape.circle,
-        color: Theme.of(context).colorScheme.primary,
-      ),
+      width: 52, height: 52,
+      decoration: const BoxDecoration(shape: BoxShape.circle, color: Color(0xFF5C6AC4)),
       alignment: Alignment.center,
-      child: const Text(
-        'Me',
-        style: TextStyle(
-          color: Colors.white,
-          fontWeight: FontWeight.w700,
-        ),
-      ),
+      child: const Text('Me', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
     );
   }
 }
 
-class _PersonChip extends StatelessWidget {
-  const _PersonChip({required this.person, required this.color});
-
-  final Person person;
-  final Color color;
-
+class _CategoryFilterBar extends StatelessWidget {
+  const _CategoryFilterBar({required this.categories, required this.selectedCategory, required this.onSelect});
+  final List<String> categories;
+  final String selectedCategory;
+  final ValueChanged<String> onSelect;
   @override
   Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-      decoration: BoxDecoration(
-        color: color.withOpacity(0.14),
-        borderRadius: BorderRadius.circular(14),
-        border: Border.all(color: color.withOpacity(0.45)),
-      ),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: <Widget>[
-          Text(
-            person.name,
-            style: const TextStyle(fontWeight: FontWeight.w700),
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 8.0),
+      child: SizedBox(
+        height: 44,
+        child: ListView.separated(
+          padding: const EdgeInsets.symmetric(horizontal: 16),
+          scrollDirection: Axis.horizontal,
+          itemBuilder: (context, index) => ChoiceChip(
+            label: Text(categories[index]),
+            selected: selectedCategory == categories[index],
+            onSelected: (_) => onSelect(categories[index]),
           ),
-          Text(
-            '${person.category} • ${person.score}',
-            style: Theme.of(context).textTheme.labelSmall,
-          ),
-        ],
+          separatorBuilder: (_, __) => const SizedBox(width: 8),
+          itemCount: categories.length,
+        ),
       ),
     );
   }
